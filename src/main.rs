@@ -1,11 +1,7 @@
+use clap::{arg, command};
 use rpassword::prompt_password;
-use std::{
-    env::args,
-    fs::{read, write, remove_file},
-};
+use std::fs::{read, remove_file, write};
 use tindercrypt::cryptors::RingCryptor;
-
-const ENCRYPTED_FILE_SUFFIX: &str = "_enc";
 
 enum Action {
     Encrypt,
@@ -13,43 +9,71 @@ enum Action {
 }
 
 fn main() {
-    let args: Vec<String> = args().collect();
+    let args = command!()
+        .arg(
+            arg!(<FILE> "File to encrypt/decrypt. If the file name ends with `_enc`, it will default to decryption. Otherwise, it will encrypt and then delete the file.")
+        )
+        .arg(
+            arg!(-n --"no-delete" "If specified, the file won't be deleted after encrypting it.")
+            .required(false)
+        )
+        .arg(
+            arg!(-e --"force-encrypt" "If specified, the file will be encrypted, even if the file name ends with `_enc`.")
+            .required(false)
+            .conflicts_with("force-decrypt")
+        )
+        .arg(
+            arg!(-d --"force-decrypt" "If specified, the file will be decrypted, even if the file name doesn't ends with `_enc`. The output file name will have `_dec` appended.")
+            .required(false)
+            .conflicts_with("force-encrypt")
+        )
+        .get_matches();
 
-    let input = if !args[1..].is_empty() {
-        args[1..].join(" ")
-    } else {
-        println!("Usage: file-encryptor FILE");
-        return;
-    };
+    let input = args.get_one::<String>("FILE").expect("FILE missing?");
 
-    println!("File: {}", input);
+    println!("Input file: {}", input);
 
-    let contents = match read(input.clone()) {
+    let contents = match read(input) {
         Ok(s) => s,
         Err(e) => {
-            println!("Got an error when opening file: {}", e.to_string());
+            println!("Got an error when opening input file: {}", e.to_string());
             return;
         }
     };
 
-    let action = if input.clone().ends_with(ENCRYPTED_FILE_SUFFIX) {
-        println!("File ends with `{ENCRYPTED_FILE_SUFFIX}`, attempting to decrypt.");
-        (
-            Action::Decrypt,
-            input
-                .strip_suffix(ENCRYPTED_FILE_SUFFIX)
-                .expect("Failed to remove suffix from file name")
-                .to_owned(),
-        )
+    let action = if args.get_flag("force-decrypt") {
+        println!("force-decrypt specified, attempting to decrypt.");
+        Action::Decrypt
+    } else if args.get_flag("force-encrypt") {
+        println!("force-encrypt specified, attempting to encrypt.");
+        Action::Encrypt
+    } else if input.ends_with("_enc") {
+        println!("Input file ends with `_enc`, attempting to decrypt.");
+        Action::Decrypt
     } else {
-        println!("File does not end with `{ENCRYPTED_FILE_SUFFIX}`, attempting to encrypt.");
-        (Action::Encrypt, input.clone() + ENCRYPTED_FILE_SUFFIX)
+        println!("Input file does not end with `_enc`, attempting to encrypt.");
+        Action::Encrypt
+    };
+
+    let output = match action {
+        Action::Decrypt => match input.strip_suffix("_enc") {
+            Some(s) => s.to_owned(),
+            None => {
+                if !args.get_flag("force-decrypt") {
+                    println!("Failed to remove _enc suffix from input file name. Using original input file name");
+                    input.to_owned()
+                } else {
+                    input.to_owned() + "_dec"
+                }
+            }
+        },
+        Action::Encrypt => input.to_owned() + "_enc",
     };
 
     let password = prompt_password("Password: ").unwrap();
     let cryptor = RingCryptor::new();
-    let data = if matches!(action.0, Action::Decrypt) {
-        match cryptor.open(password.as_bytes(), contents.as_slice()) {
+    let data = match action {
+        Action::Decrypt => match cryptor.open(password.as_bytes(), contents.as_slice()) {
             Ok(d) => d,
             Err(e) => {
                 println!(
@@ -58,38 +82,60 @@ fn main() {
                 );
                 return;
             }
-        }
-    } else if matches!(action.0, Action::Encrypt) {
-        match cryptor.seal_with_passphrase(password.as_bytes(), contents.as_slice()) {
-            Ok(d) => d,
-            Err(e) => {
-                println!("Got an error when encrypting: {}", e.to_string());
-                return;
+        },
+        Action::Encrypt => {
+            match cryptor.seal_with_passphrase(password.as_bytes(), contents.as_slice()) {
+                Ok(d) => d,
+                Err(e) => {
+                    println!("Got an error when encrypting: {}", e.to_string());
+                    return;
+                }
             }
         }
-    } else {
-        panic!("action is not encrypt or decrypt")
     };
 
     drop(password);
     drop(contents);
 
-    write(action.1.as_str(), data).expect("Failed to write data to file!");
+    match write(&output, data) {
+        Ok(_) => {}
+        Err(e) => {
+            println!(
+                "Got an error when writing to output file ({}): {}",
+                &output,
+                e.to_string()
+            );
+            return;
+        }
+    }
 
     println!(
         "Successfully {} {} to {}!",
-        if matches!(action.0, Action::Decrypt) {
-            "decrypted"
-        } else {
-            "encrypted"
+        match action {
+            Action::Decrypt => "decrypted",
+            Action::Encrypt => "encrypted",
         },
-        input.clone(),
-        action.1
+        input,
+        &output
     );
 
-    if matches!(action.0, Action::Encrypt) {
-        println!("Deleting {}", input.clone());
-        remove_file(input).expect("Failed to delete file");
-        println!("Success!");
+    if matches!(action, Action::Encrypt) {
+        if args.get_flag("no-delete") {
+            println!("Skipping input file deletion because no-delete was specified");
+        } else {
+            println!("Deleting input file {}", input);
+            match remove_file(input) {
+                Ok(_) => {}
+                Err(e) => {
+                    println!(
+                        "Got an error when deleting input file ({}): {}",
+                        input,
+                        e.to_string()
+                    );
+                    return;
+                }
+            }
+            println!("Success!");
+        }
     }
 }
