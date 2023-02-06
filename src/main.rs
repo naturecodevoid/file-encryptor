@@ -1,6 +1,12 @@
 use clap::{arg, command};
+use cwd::cwd;
+use rfd::FileDialog;
 use rpassword::prompt_password;
-use std::fs::{read, remove_file, write};
+use std::{
+    fs::{read, remove_file, write},
+    io::{stdin, stdout, Read, Write},
+    process::exit,
+};
 use tindercrypt::cryptors::RingCryptor;
 
 enum Action {
@@ -8,10 +14,19 @@ enum Action {
     Decrypt,
 }
 
+fn enter_to_exit() {
+    let mut stdout = stdout();
+
+    write!(stdout, "Press Enter to exit...").unwrap();
+    stdout.flush().unwrap();
+
+    stdin().read(&mut [0u8]).unwrap();
+}
+
 fn main() {
     let args = command!()
         .arg(
-            arg!(<FILE> "File to encrypt/decrypt. If the file name ends with `_enc`, it will default to decryption. Otherwise, it will encrypt and then delete the file.")
+            arg!([FILE] "File to encrypt/decrypt. If the file name ends with `_enc`, it will default to decryption. Otherwise, it will encrypt and then delete the file.")
         )
         .arg(
             arg!(-n --"no-delete" "If specified, the file won't be deleted after encrypting it.")
@@ -29,14 +44,28 @@ fn main() {
         )
         .get_matches();
 
-    let input = args.get_one::<String>("FILE").expect("FILE missing?");
+    let input = match args.get_one::<String>("FILE") {
+        Some(s) => s.to_owned(),
+        None => {
+            println!("FILE argument not specified, opening a file dialog.");
+            match FileDialog::new().set_directory(cwd()).pick_file() {
+                Some(p) => p.to_str().unwrap().to_owned(),
+                None => {
+                    println!("No file chosen.");
+                    enter_to_exit();
+                    exit(1);
+                }
+            }
+        }
+    };
 
     println!("Input file: {}", input);
 
-    let contents = match read(input) {
+    let contents = match read(&input) {
         Ok(s) => s,
         Err(e) => {
             println!("Got an error when opening input file: {}", e.to_string());
+            enter_to_exit();
             return;
         }
     };
@@ -80,6 +109,7 @@ fn main() {
                     "Got an error when decrypting (password might be incorrect): {}",
                     e.to_string()
                 );
+                enter_to_exit();
                 return;
             }
         },
@@ -88,6 +118,7 @@ fn main() {
                 Ok(d) => d,
                 Err(e) => {
                     println!("Got an error when encrypting: {}", e.to_string());
+                    enter_to_exit();
                     return;
                 }
             }
@@ -105,6 +136,7 @@ fn main() {
                 &output,
                 e.to_string()
             );
+            enter_to_exit();
             return;
         }
     }
@@ -115,7 +147,7 @@ fn main() {
             Action::Decrypt => "decrypted",
             Action::Encrypt => "encrypted",
         },
-        input,
+        &input,
         &output
     );
 
@@ -123,19 +155,22 @@ fn main() {
         if args.get_flag("no-delete") {
             println!("Skipping input file deletion because no-delete was specified");
         } else {
-            println!("Deleting input file {}", input);
-            match remove_file(input) {
+            println!("Deleting input file {}", &input);
+            match remove_file(&input) {
                 Ok(_) => {}
                 Err(e) => {
                     println!(
                         "Got an error when deleting input file ({}): {}",
-                        input,
+                        &input,
                         e.to_string()
                     );
+                    enter_to_exit();
                     return;
                 }
             }
             println!("Success!");
         }
     }
+
+    enter_to_exit();
 }
